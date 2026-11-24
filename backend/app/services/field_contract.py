@@ -16,24 +16,46 @@ class FieldContractService(BaseModuleService):
     MODULE = "field_contract"
     ENTITY = "字段映射"
     OPERATION_TERM = "转换"
-    LIST_FIELDS = ["契约编号", "源字段", "目标字段", "数据类型", "转换规则", "必填标记", "默认值", "契约版本"]
+    LIST_FIELDS = ["契约编号", "源字段", "目标字段", "数据类型", "转换规则", "必填标记", "默认值",
+                   "契约版本", "适用源端", "生效开始", "生效结束", "撤回标记"]
     REQUIRED_FIELDS = ["契约编号", "源字段", "目标字段"]
     STATUS_ORDER = ["草稿", "待校验", "已生效", "已废弃"]
     ACTION_RULES = {"提交校验": "待校验", "确认生效": "已生效", "标记废弃": "已废弃"}
     NEGATIVE_ACTIONS = ["标记废弃"]
 
-    def create_contract(self, source_field: str, target_field: str, data_type: str = "string") -> dict[str, Any]:
-        """创建源端到目标端字段映射契约，登记转换规则与数据类型。"""
-        contract_code = f"FIEL-{source_field}-{target_field}"
+    def create_contract(
+        self,
+        source_field: str,
+        target_field: str,
+        data_type: str = "string",
+        *,
+        version: str = "v1.0",
+        scope_source: str = "通用",
+        effective_start: str | float | None = None,
+        effective_end: str | float | None = None,
+        transform_rule: str | None = None,
+        contract_code: str | None = None,
+    ) -> dict[str, Any]:
+        """创建源端到目标端字段映射契约，登记规则归属、生效窗口与版本。
+
+        scope_source 为「通用」时两个源端可共享；否则为该源端的专属规则，
+        映射任务构建清单时必须分别核验权限。生效起止时间用于按抽取窗口时刻
+        判定规则是否在有效期内（如 v1 交接期与 v2 生效期重叠的场景）。
+        """
+        contract_code = contract_code or f"FIEL-{source_field}-{target_field}-{version}"
         values = {
             "契约编号": contract_code,
             "源字段": source_field,
             "目标字段": target_field,
             "数据类型": data_type,
-            "转换规则": "直接映射" if data_type == "string" else "类型转换",
+            "转换规则": transform_rule or ("直接映射" if data_type == "string" else "类型转换"),
             "必填标记": "是",
             "默认值": "",
-            "契约版本": "v1.0",
+            "契约版本": version,
+            "适用源端": scope_source,
+            "生效开始": effective_start if effective_start is not None else "",
+            "生效结束": effective_end if effective_end is not None else "",
+            "撤回标记": "否",
         }
         entry, missing = self.create_entry(values)
         if entry is None:
@@ -41,9 +63,22 @@ class FieldContractService(BaseModuleService):
         self._write_jsonl(
             self._data_dir("events") / "contract_log.jsonl",
             [{"action": "create", "contract_code": contract_code, "source_field": source_field,
-              "target_field": target_field, "at": time.time()}]
+              "target_field": target_field, "version": version, "scope_source": scope_source,
+              "at": time.time()}]
         )
         return entry
+
+    def withdraw_contract(self, contract_id: int) -> dict[str, Any]:
+        """撤回契约：撤回后清单构建不再纳入，但已冻结清单与历史轮次结果不受影响。"""
+        entry = store.find(self.MODULE, contract_id)
+        if entry is None:
+            return {"error": f"字段映射 {contract_id} 不存在"}
+        entry["撤回标记"] = "是"
+        self._write_jsonl(
+            self._data_dir("events") / "contract_log.jsonl",
+            [{"action": "withdraw", "contract_code": entry.get("契约编号"), "at": time.time()}]
+        )
+        return {"ok": True, "契约编号": entry.get("契约编号"), "撤回标记": "是"}
 
     def apply_contracts(self, source_code: str, record_count: int = 10) -> dict[str, Any]:
         """对指定源端抽取产物应用已生效的字段映射契约，执行类型转换并写入转换产物文件。
@@ -79,6 +114,7 @@ class FieldContractService(BaseModuleService):
         conversion_count = 0
         for rec in source_records:
             new_rec = {}
+            lineage = []
             for contract in contracts:
                 src_f = contract.get("源字段", "")
                 tgt_f = contract.get("目标字段", "")
@@ -101,6 +137,15 @@ class FieldContractService(BaseModuleService):
                 new_rec["_source_code"] = source_code
                 new_rec["_contract_version"] = contract.get("契约版本", "v1.0")
                 new_rec["_converted_at"] = time.time()
+                # 保留实际采用的来源、目标字段与版本，供结果回查
+                lineage.append({
+                    "source_field": src_f,
+                    "target_field": tgt_f,
+                    "contract_code": contract.get("契约编号", ""),
+                    "contract_version": contract.get("契约版本", "v1.0"),
+                    "rule_scope": contract.get("适用源端", "通用"),
+                })
+            new_rec["_lineage"] = lineage
             if new_rec:
                 transformed.append(new_rec)
 

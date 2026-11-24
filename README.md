@@ -11,7 +11,7 @@
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端
 │   ├── src/views/WorkbenchView.vue|tsx  全部模块共享工作台
-│   ├── src/data/modules.ts              18个业务模块配置
+│   ├── src/data/modules.ts              19个业务模块配置（由 scripts/gen_modules.py 生成）
 │   ├── src/api/              统一请求封装
 │   └── vite.config.ts        dev server 配置（open: false）
 ├── backend/                  FastAPI（Python） 后端
@@ -52,7 +52,8 @@ npm run dev
 | --- | --- | --- | --- |
 | 源端登记 | `source_register` | 源端系统 | 源端编号、系统名称、数据域 |
 | 目标端登记 | `target_register` | 目标端点 | 目标编号、系统名称、接收格式 |
-| 字段契约 | `field_contract` | 字段映射 | 契约编号、源字段、目标字段 |
+| 字段契约 | `field_contract` | 字段映射 | 契约编号、源字段、目标字段、适用源端、生效开始/结束、契约版本、撤回标记 |
+| 可用字段契约清单 | `contract_catalog` | 窗口级冻结契约集合 | 清单编号、窗口编号、源端编号、生效时间、契约条目数、校验值 |
 | 增量窗口 | `extract_window` | 抽取窗口 | 窗口编号、源端编号、增量字段 |
 | 传输批次 | `transfer_batch` | 传输批次 | 批次编号、窗口编号、目标编号 |
 | 暂存落地 | `staging_area` | 暂存分区 | 暂存编号、批次编号、落地路径 |
@@ -76,6 +77,27 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 可用字段契约清单（按窗口的规则归属与权限）
+
+`contract_catalog` 解决字段契约缺少「按抽取窗口校验规则归属和权限」的问题，映射任务
+不再直接读取全量契约，而是先拿到一份冻结、可回查的可用契约集合。
+
+- **规则归属与有效期**：字段契约新增 `适用源端`、`生效开始/结束`、`撤回标记`。
+  `适用源端=通用` 的规则可被两个源端共享；专属规则只有归属源端可用，权限分别核验，
+  被拒绝的契约会进清单的 `denied` 列表并注明原因。
+- **两版合法规则并存**：同一目标字段存在多版有效契约时，默认按版本号取最高（newest wins），
+  清单保留 `候选版本` 可回查；`preferred_versions` 可在交接期钉住旧版（如 v1）。
+- **冻结与复用**：`POST /api/contract-catalog/build` 按窗口冻结清单（含校验值，落盘
+  `data/catalogs/`），同一窗口重复构建返回同一份；契约撤回不影响已冻结集合。
+- **映射轮次**：`POST /api/contract-catalog/rounds/start` 基于冻结清单转换，结果逐行保留
+  实际采用的源字段、目标字段、契约编号与版本（lineage），并写入轮次校验值。轮次只访问
+  清单内的源字段，因此 A 轮次不会读取 B 的专属列。
+- **暂停/恢复**：`pause` / `resume` 保留处理水位并复用同一冻结清单，恢复时校验清单
+  校验值，类型规则不会 v1/v2 混用。
+- **重算评估**：`POST /api/contract-catalog/evaluate-recompute` 按当前时刻重新组装临时
+  清单，与历史轮次采用版本逐字段对比，输出 `need_recompute` 与差异字段（如交接期结束后
+  v1 → v2）。
 
 领域：数据工程
 子方向：数仓与数据湖

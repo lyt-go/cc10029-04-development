@@ -96,6 +96,21 @@ class ExtractWindowService(BaseModuleService):
 
         return result
 
+    def get_window(self, window_id: int) -> dict[str, Any] | None:
+        """按 id 回查抽取窗口记录。"""
+        return self.get_entry(window_id)
+
+    def is_window_started(self, window_id: int) -> bool:
+        """判断窗口是否已经开始产生映射结果（状态离开草稿即视为已开始）。
+
+        窗口登记后、启动抽取前处于「草稿」态，对应「已登记尚未开始」；
+        一旦执行启动抽取进入「抽取中」，映射结果即开始产生。
+        """
+        window = self.get_entry(window_id)
+        if window is None:
+            return False
+        return window.get("status") != "草稿"
+
     def close_window(self, window_id: int) -> dict[str, Any]:
         """闭合抽取窗口，生成窗口产物摘要（记录条数、字节总量、校验值），写入闭合事件日志。"""
         window = self.get_entry(window_id)
